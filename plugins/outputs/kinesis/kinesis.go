@@ -1,18 +1,18 @@
 package kinesis
 
 import (
-	"fmt"
 	"log"
 	"os"
-	"sync/atomic"
 	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/service/kinesis"
+	"github.com/satori/go.uuid"
 
 	"github.com/influxdata/telegraf"
 	internalaws "github.com/influxdata/telegraf/internal/config/aws"
 	"github.com/influxdata/telegraf/plugins/outputs"
+	"github.com/influxdata/telegraf/plugins/serializers"
 )
 
 type KinesisOutput struct {
@@ -24,11 +24,13 @@ type KinesisOutput struct {
 	Filename  string `toml:"shared_credential_file"`
 	Token     string `toml:"token"`
 
-	StreamName   string `toml:"streamname"`
-	PartitionKey string `toml:"partitionkey"`
-	Format       string `toml:"format"`
-	Debug        bool   `toml:"debug"`
-	svc          *kinesis.Kinesis
+	StreamName         string `toml:"streamname"`
+	PartitionKey       string `toml:"partitionkey"`
+	RandomPartitionKey bool   `toml:"use_random_partitionkey"`
+	Debug              bool   `toml:"debug"`
+	svc                *kinesis.Kinesis
+
+	serializer serializers.Serializer
 }
 
 var sampleConfig = `
@@ -54,9 +56,18 @@ var sampleConfig = `
   streamname = "StreamName"
   ## PartitionKey as used for sharding data.
   partitionkey = "PartitionKey"
-  ## format of the Data payload in the kinesis PutRecord, supported
-  ## String and Custom.
-  format = "string"
+  ## If set the paritionKey will be a random UUID on every put.
+  ## This allows for scaling across multiple shards in a stream.
+  ## This will cause issues with ordering.
+  use_random_partitionkey = false
+
+
+  ## Data format to output.
+  ## Each data format has its own unique set of configuration options, read
+  ## more about them here:
+  ## https://github.com/influxdata/telegraf/blob/master/docs/DATA_FORMATS_OUTPUT.md
+  data_format = "influx"
+
   ## debug will show upstream aws messages.
   debug = false
 `
@@ -125,16 +136,8 @@ func (k *KinesisOutput) Close() error {
 	return nil
 }
 
-func FormatMetric(k *KinesisOutput, point telegraf.Metric) (string, error) {
-	if k.Format == "string" {
-		return point.String(), nil
-	} else {
-		m := fmt.Sprintf("%+v,%+v,%+v",
-			point.Name(),
-			point.Tags(),
-			point.String())
-		return m, nil
-	}
+func (k *KinesisOutput) SetSerializer(serializer serializers.Serializer) {
+	k.serializer = serializer
 }
 
 func writekinesis(k *KinesisOutput, r []*kinesis.PutRecordsRequestEntry) time.Duration {
@@ -161,7 +164,7 @@ func writekinesis(k *KinesisOutput, r []*kinesis.PutRecordsRequestEntry) time.Du
 }
 
 func (k *KinesisOutput) Write(metrics []telegraf.Metric) error {
-	var sz uint32 = 0
+	var sz uint32
 
 	if len(metrics) == 0 {
 		return nil
@@ -169,23 +172,35 @@ func (k *KinesisOutput) Write(metrics []telegraf.Metric) error {
 
 	r := []*kinesis.PutRecordsRequestEntry{}
 
-	for _, p := range metrics {
-		atomic.AddUint32(&sz, 1)
+	for _, metric := range metrics {
+		sz++
 
-		metric, _ := FormatMetric(k, p)
-		d := kinesis.PutRecordsRequestEntry{
-			Data:         []byte(metric),
-			PartitionKey: aws.String(k.PartitionKey),
+		values, err := k.serializer.Serialize(metric)
+		if err != nil {
+			return err
 		}
+
+		partitionKey := k.PartitionKey
+		if k.RandomPartitionKey {
+			u := uuid.NewV4()
+			partitionKey = u.String()
+		}
+
+		d := kinesis.PutRecordsRequestEntry{
+			Data:         values,
+			PartitionKey: aws.String(partitionKey),
+		}
+
 		r = append(r, &d)
 
 		if sz == 500 {
 			// Max Messages Per PutRecordRequest is 500
 			elapsed := writekinesis(k, r)
 			log.Printf("E! Wrote a %+v point batch to Kinesis in %+v.\n", sz, elapsed)
-			atomic.StoreUint32(&sz, 0)
+			sz = 0
 			r = nil
 		}
+
 	}
 
 	writekinesis(k, r)

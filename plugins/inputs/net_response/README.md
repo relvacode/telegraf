@@ -7,6 +7,27 @@ It can also check response text.
 
 ```
 [[inputs.net_response]]
+  ## Protocol, must be "tcp" or "udp"
+  ## NOTE: because the "udp" protocol does not respond to requests, it requires
+  ## a send/expect string pair (see below).
+  protocol = "tcp"
+  ## Server address (default localhost)
+  address = "localhost:80"
+  ## Set timeout
+  timeout = "1s"
+
+  ## Set read timeout (only used if expecting a response)
+  read_timeout = "1s"
+
+  ## The following options are required for UDP checks. For TCP, they are
+  ## optional. The plugin will send the given string to the server and then
+  ## expect to receive the given 'expect' string back.
+  ## string sent to the server
+  # send = "ssh"
+  ## expected string in answer
+  # expect = "ssh"
+
+[[inputs.net_response]]
   protocol = "tcp"
   address = ":80"
 
@@ -30,6 +51,8 @@ It can also check response text.
   protocol = "udp"
   address = "localhost:161"
   timeout = "2s"
+  send = "hello server"
+  expect = "hello client"
 ```
 
 ### Measurements & Fields:
@@ -48,7 +71,7 @@ It can also check response text.
 ### Example Output:
 
 ```
-$ ./telegraf -config telegraf.conf -input-filter net_response -test
+$ ./telegraf --config telegraf.conf --input-filter net_response --test
 net_response,server=192.168.2.2,port=22,protocol=tcp response_time=0.18070360500000002,string_found=true 1454785464182527094
 net_response,server=192.168.2.2,port=2222,protocol=tcp response_time=1.090124776,string_found=false 1454784433658942325
 

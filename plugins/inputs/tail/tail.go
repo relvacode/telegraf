@@ -2,10 +2,10 @@ package tail
 
 import (
 	"fmt"
-	"log"
+	"strings"
 	"sync"
 
-	"github.com/hpcloud/tail"
+	"github.com/influxdata/tail"
 
 	"github.com/influxdata/telegraf"
 	"github.com/influxdata/telegraf/internal/globpath"
@@ -16,6 +16,7 @@ import (
 type Tail struct {
 	Files         []string
 	FromBeginning bool
+	Pipe          bool
 
 	tailers []*tail.Tail
 	parser  parsers.Parser
@@ -44,9 +45,11 @@ const sampleConfig = `
   files = ["/var/mymetrics.out"]
   ## Read file from beginning.
   from_beginning = false
+  ## Whether file is a named pipe
+  pipe = false
 
   ## Data format to consume.
-  ## Each data format has it's own unique set of configuration options, read
+  ## Each data format has its own unique set of configuration options, read
   ## more about them here:
   ## https://github.com/influxdata/telegraf/blob/master/docs/DATA_FORMATS_INPUT.md
   data_format = "influx"
@@ -70,29 +73,31 @@ func (t *Tail) Start(acc telegraf.Accumulator) error {
 
 	t.acc = acc
 
-	var seek tail.SeekInfo
-	if !t.FromBeginning {
-		seek.Whence = 2
-		seek.Offset = 0
+	var seek *tail.SeekInfo
+	if !t.Pipe && !t.FromBeginning {
+		seek = &tail.SeekInfo{
+			Whence: 2,
+			Offset: 0,
+		}
 	}
 
-	var errS string
 	// Create a "tailer" for each file
 	for _, filepath := range t.Files {
 		g, err := globpath.Compile(filepath)
 		if err != nil {
-			log.Printf("E! Error Glob %s failed to compile, %s", filepath, err)
+			t.acc.AddError(fmt.Errorf("E! Error Glob %s failed to compile, %s", filepath, err))
 		}
 		for file, _ := range g.Match() {
 			tailer, err := tail.TailFile(file,
 				tail.Config{
 					ReOpen:    true,
 					Follow:    true,
-					Location:  &seek,
+					Location:  seek,
 					MustExist: true,
+					Pipe:      t.Pipe,
 				})
 			if err != nil {
-				errS += err.Error() + " "
+				acc.AddError(err)
 				continue
 			}
 			// create a goroutine for each "tailer"
@@ -102,9 +107,6 @@ func (t *Tail) Start(acc telegraf.Accumulator) error {
 		}
 	}
 
-	if errS != "" {
-		return fmt.Errorf(errS)
-	}
 	return nil
 }
 
@@ -118,17 +120,24 @@ func (t *Tail) receiver(tailer *tail.Tail) {
 	var line *tail.Line
 	for line = range tailer.Lines {
 		if line.Err != nil {
-			log.Printf("E! Error tailing file %s, Error: %s\n",
-				tailer.Filename, err)
+			t.acc.AddError(fmt.Errorf("E! Error tailing file %s, Error: %s\n",
+				tailer.Filename, err))
 			continue
 		}
-		m, err = t.parser.ParseLine(line.Text)
+		// Fix up files with Windows line endings.
+		text := strings.TrimRight(line.Text, "\r")
+
+		m, err = t.parser.ParseLine(text)
 		if err == nil {
 			t.acc.AddFields(m.Name(), m.Fields(), m.Tags(), m.Time())
 		} else {
-			log.Printf("E! Malformed log line in %s: [%s], Error: %s\n",
-				tailer.Filename, line.Text, err)
+			t.acc.AddError(fmt.Errorf("E! Malformed log line in %s: [%s], Error: %s\n",
+				tailer.Filename, line.Text, err))
 		}
+	}
+	if err := tailer.Err(); err != nil {
+		t.acc.AddError(fmt.Errorf("E! Error tailing file %s, Error: %s\n",
+			tailer.Filename, err))
 	}
 }
 
@@ -136,12 +145,12 @@ func (t *Tail) Stop() {
 	t.Lock()
 	defer t.Unlock()
 
-	for _, t := range t.tailers {
-		err := t.Stop()
+	for _, tailer := range t.tailers {
+		err := tailer.Stop()
 		if err != nil {
-			log.Printf("E! Error stopping tail on file %s\n", t.Filename)
+			t.acc.AddError(fmt.Errorf("E! Error stopping tail on file %s\n", tailer.Filename))
 		}
-		t.Cleanup()
+		tailer.Cleanup()
 	}
 	t.wg.Wait()
 }

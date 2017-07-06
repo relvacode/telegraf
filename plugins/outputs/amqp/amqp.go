@@ -1,9 +1,9 @@
 package amqp
 
 import (
-	"bytes"
 	"fmt"
 	"log"
+	"net"
 	"strings"
 	"sync"
 	"time"
@@ -15,6 +15,12 @@ import (
 
 	"github.com/streadway/amqp"
 )
+
+type client struct {
+	conn    *amqp.Connection
+	channel *amqp.Channel
+	headers amqp.Table
+}
 
 type AMQP struct {
 	// AMQP brokers to send metrics to
@@ -29,8 +35,10 @@ type AMQP struct {
 	Database string
 	// InfluxDB retention policy
 	RetentionPolicy string
-	// InfluxDB precision
+	// InfluxDB precision (DEPRECATED)
 	Precision string
+	// Connection timeout
+	Timeout internal.Duration
 
 	// Path to CA file
 	SSLCA string `toml:"ssl_ca"`
@@ -41,9 +49,8 @@ type AMQP struct {
 	// Use SSL but skip chain & host verification
 	InsecureSkipVerify bool
 
-	channel *amqp.Channel
 	sync.Mutex
-	headers amqp.Table
+	c *client
 
 	serializer serializers.Serializer
 }
@@ -61,7 +68,6 @@ const (
 	DefaultAuthMethod      = "PLAIN"
 	DefaultRetentionPolicy = "default"
 	DefaultDatabase        = "telegraf"
-	DefaultPrecision       = "s"
 )
 
 var sampleConfig = `
@@ -70,17 +76,21 @@ var sampleConfig = `
   ## AMQP exchange
   exchange = "telegraf"
   ## Auth method. PLAIN and EXTERNAL are supported
+  ## Using EXTERNAL requires enabling the rabbitmq_auth_mechanism_ssl plugin as
+  ## described here: https://www.rabbitmq.com/plugins.html
   # auth_method = "PLAIN"
   ## Telegraf tag to use as a routing key
-  ##  ie, if this tag exists, it's value will be used as the routing key
+  ##  ie, if this tag exists, its value will be used as the routing key
   routing_tag = "host"
 
   ## InfluxDB retention policy
   # retention_policy = "default"
   ## InfluxDB database
   # database = "telegraf"
-  ## InfluxDB precision
-  # precision = "s"
+
+  ## Write timeout, formatted as a string.  If not provided, will default
+  ## to 5s. 0s means no timeout (not recommended).
+  # timeout = "5s"
 
   ## Optional SSL Config
   # ssl_ca = "/etc/telegraf/ca.pem"
@@ -90,7 +100,7 @@ var sampleConfig = `
   # insecure_skip_verify = false
 
   ## Data format to output.
-  ## Each data format has it's own unique set of configuration options, read
+  ## Each data format has its own unique set of configuration options, read
   ## more about them here:
   ## https://github.com/influxdata/telegraf/blob/master/docs/DATA_FORMATS_OUTPUT.md
   data_format = "influx"
@@ -101,11 +111,7 @@ func (a *AMQP) SetSerializer(serializer serializers.Serializer) {
 }
 
 func (q *AMQP) Connect() error {
-	q.Lock()
-	defer q.Unlock()
-
-	q.headers = amqp.Table{
-		"precision":        q.Precision,
+	headers := amqp.Table{
 		"database":         q.Database,
 		"retention_policy": q.RetentionPolicy,
 	}
@@ -128,12 +134,16 @@ func (q *AMQP) Connect() error {
 	amqpConf := amqp.Config{
 		TLSClientConfig: tls,
 		SASL:            sasl, // if nil, it will be PLAIN
+		Dial: func(network, addr string) (net.Conn, error) {
+			return net.DialTimeout(network, addr, q.Timeout.Duration)
+		},
 	}
 
 	connection, err = amqp.DialConfig(q.URL, amqpConf)
 	if err != nil {
 		return err
 	}
+
 	channel, err := connection.Channel()
 	if err != nil {
 		return fmt.Errorf("Failed to open a channel: %s", err)
@@ -151,21 +161,43 @@ func (q *AMQP) Connect() error {
 	if err != nil {
 		return fmt.Errorf("Failed to declare an exchange: %s", err)
 	}
-	q.channel = channel
+
+	q.setClient(&client{
+		conn:    connection,
+		channel: channel,
+		headers: headers,
+	})
+
 	go func() {
-		log.Printf("I! Closing: %s", <-connection.NotifyClose(make(chan *amqp.Error)))
+		err := <-connection.NotifyClose(make(chan *amqp.Error))
+		if err == nil {
+			return
+		}
+
+		q.setClient(nil)
+
+		log.Printf("I! Closing: %s", err)
 		log.Printf("I! Trying to reconnect")
 		for err := q.Connect(); err != nil; err = q.Connect() {
 			log.Println("E! ", err.Error())
 			time.Sleep(10 * time.Second)
 		}
-
 	}()
 	return nil
 }
 
 func (q *AMQP) Close() error {
-	return q.channel.Close()
+	c := q.getClient()
+	if c == nil {
+		return nil
+	}
+
+	err := c.conn.Close()
+	if err != nil && err != amqp.ErrClosed {
+		log.Printf("E! Error closing AMQP connection: %s", err)
+		return err
+	}
+	return nil
 }
 
 func (q *AMQP) SampleConfig() string {
@@ -177,12 +209,16 @@ func (q *AMQP) Description() string {
 }
 
 func (q *AMQP) Write(metrics []telegraf.Metric) error {
-	q.Lock()
-	defer q.Unlock()
 	if len(metrics) == 0 {
 		return nil
 	}
-	var outbuf = make(map[string][][]byte)
+
+	c := q.getClient()
+	if c == nil {
+		return fmt.Errorf("connection is not open")
+	}
+
+	outbuf := make(map[string][]byte)
 
 	for _, metric := range metrics {
 		var key string
@@ -192,32 +228,44 @@ func (q *AMQP) Write(metrics []telegraf.Metric) error {
 			}
 		}
 
-		values, err := q.serializer.Serialize(metric)
+		buf, err := q.serializer.Serialize(metric)
 		if err != nil {
 			return err
 		}
 
-		for _, value := range values {
-			outbuf[key] = append(outbuf[key], []byte(value))
-		}
+		outbuf[key] = append(outbuf[key], buf...)
 	}
 
 	for key, buf := range outbuf {
-		err := q.channel.Publish(
+		// Note that since the channel is not in confirm mode, the absence of
+		// an error does not indicate successful delivery.
+		err := c.channel.Publish(
 			q.Exchange, // exchange
 			key,        // routing key
 			false,      // mandatory
 			false,      // immediate
 			amqp.Publishing{
-				Headers:     q.headers,
+				Headers:     c.headers,
 				ContentType: "text/plain",
-				Body:        bytes.Join(buf, []byte("\n")),
+				Body:        buf,
 			})
 		if err != nil {
-			return fmt.Errorf("FAILED to send amqp message: %s", err)
+			return fmt.Errorf("Failed to send AMQP message: %s", err)
 		}
 	}
 	return nil
+}
+
+func (q *AMQP) getClient() *client {
+	q.Lock()
+	defer q.Unlock()
+	return q.c
+}
+
+func (q *AMQP) setClient(c *client) {
+	q.Lock()
+	q.c = c
+	q.Unlock()
 }
 
 func init() {
@@ -225,8 +273,8 @@ func init() {
 		return &AMQP{
 			AuthMethod:      DefaultAuthMethod,
 			Database:        DefaultDatabase,
-			Precision:       DefaultPrecision,
 			RetentionPolicy: DefaultRetentionPolicy,
+			Timeout:         internal.Duration{Duration: time.Second * 5},
 		}
 	})
 }

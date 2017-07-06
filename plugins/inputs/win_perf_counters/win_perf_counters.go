@@ -10,10 +10,9 @@ import (
 
 	"github.com/influxdata/telegraf"
 	"github.com/influxdata/telegraf/plugins/inputs"
-	"github.com/lxn/win"
 )
 
-var sampleConfig string = `
+var sampleConfig = `
   ## By default this plugin returns basic CPU and Disk statistics.
   ## See the README file for more examples.
   ## Uncomment examples below or write your own as you see fit. If the system
@@ -66,18 +65,13 @@ var sampleConfig string = `
     Measurement = "win_mem"
 `
 
-// Valid queries end up in this map.
-var gItemList = make(map[int]*item)
-
-var configParsed bool
-var testConfigParsed bool
-var testObject string
-
 type Win_PerfCounters struct {
 	PrintValid      bool
-	TestName        string
 	PreVistaSupport bool
 	Object          []perfobject
+
+	configParsed bool
+	itemCache    []*item
 }
 
 type perfobject struct {
@@ -90,12 +84,6 @@ type perfobject struct {
 	IncludeTotal  bool
 }
 
-// Parsed configuration ends up here after it has been validated for valid
-// Performance Counter paths
-type itemList struct {
-	items map[int]*item
-}
-
 type item struct {
 	query         string
 	objectName    string
@@ -103,68 +91,36 @@ type item struct {
 	instance      string
 	measurement   string
 	include_total bool
-	handle        win.PDH_HQUERY
-	counterHandle win.PDH_HCOUNTER
+	handle        PDH_HQUERY
+	counterHandle PDH_HCOUNTER
 }
 
 var sanitizedChars = strings.NewReplacer("/sec", "_persec", "/Sec", "_persec",
 	" ", "_", "%", "Percent", `\`, "")
 
-func (m *Win_PerfCounters) AddItem(metrics *itemList, query string, objectName string, counter string, instance string,
-	measurement string, include_total bool) {
+func (m *Win_PerfCounters) AddItem(query string, objectName string, counter string, instance string,
+	measurement string, include_total bool) error {
 
-	var handle win.PDH_HQUERY
-	var counterHandle win.PDH_HCOUNTER
-	ret := win.PdhOpenQuery(0, 0, &handle)
+	var handle PDH_HQUERY
+	var counterHandle PDH_HCOUNTER
+	ret := PdhOpenQuery(0, 0, &handle)
 	if m.PreVistaSupport {
-		ret = win.PdhAddCounter(handle, query, 0, &counterHandle)
+		ret = PdhAddCounter(handle, query, 0, &counterHandle)
 	} else {
-		ret = win.PdhAddEnglishCounter(handle, query, 0, &counterHandle)
+		ret = PdhAddEnglishCounter(handle, query, 0, &counterHandle)
 	}
-	_ = ret
 
-	temp := &item{query, objectName, counter, instance, measurement,
+	// Call PdhCollectQueryData one time to check existance of the counter
+	ret = PdhCollectQueryData(handle)
+	if ret != ERROR_SUCCESS {
+		PdhCloseQuery(handle)
+		return errors.New(PdhFormatError(ret))
+	}
+
+	newItem := &item{query, objectName, counter, instance, measurement,
 		include_total, handle, counterHandle}
-	index := len(gItemList)
-	gItemList[index] = temp
+	m.itemCache = append(m.itemCache, newItem)
 
-	if metrics.items == nil {
-		metrics.items = make(map[int]*item)
-	}
-	metrics.items[index] = temp
-}
-
-func (m *Win_PerfCounters) InvalidObject(exists uint32, query string, PerfObject perfobject, instance string, counter string) error {
-	if exists == 3221228472 { // win.PDH_CSTATUS_NO_OBJECT
-		if PerfObject.FailOnMissing {
-			err := errors.New("Performance object does not exist")
-			return err
-		} else {
-			fmt.Printf("Performance Object '%s' does not exist in query: %s\n", PerfObject.ObjectName, query)
-		}
-	} else if exists == 3221228473 { //win.PDH_CSTATUS_NO_COUNTER
-
-		if PerfObject.FailOnMissing {
-			err := errors.New("Counter in Performance object does not exist")
-			return err
-		} else {
-			fmt.Printf("Counter '%s' does not exist in query: %s\n", counter, query)
-		}
-	} else if exists == 2147485649 { //win.PDH_CSTATUS_NO_INSTANCE
-		if PerfObject.FailOnMissing {
-			err := errors.New("Instance in Performance object does not exist")
-			return err
-		} else {
-			fmt.Printf("Instance '%s' does not exist in query: %s\n", instance, query)
-
-		}
-	} else {
-		fmt.Printf("Invalid result: %v, query: %s\n", exists, query)
-		if PerfObject.FailOnMissing {
-			err := errors.New("Invalid query for Performance Counters")
-			return err
-		}
-	}
 	return nil
 }
 
@@ -176,10 +132,8 @@ func (m *Win_PerfCounters) SampleConfig() string {
 	return sampleConfig
 }
 
-func (m *Win_PerfCounters) ParseConfig(metrics *itemList) error {
+func (m *Win_PerfCounters) ParseConfig() error {
 	var query string
-
-	configParsed = true
 
 	if len(m.Object) > 0 {
 		for _, PerfObject := range m.Object {
@@ -193,17 +147,18 @@ func (m *Win_PerfCounters) ParseConfig(metrics *itemList) error {
 						query = "\\" + objectname + "(" + instance + ")\\" + counter
 					}
 
-					var exists uint32 = win.PdhValidatePath(query)
+					err := m.AddItem(query, objectname, counter, instance,
+						PerfObject.Measurement, PerfObject.IncludeTotal)
 
-					if exists == win.ERROR_SUCCESS {
+					if err == nil {
 						if m.PrintValid {
 							fmt.Printf("Valid: %s\n", query)
 						}
-						m.AddItem(metrics, query, objectname, counter, instance,
-							PerfObject.Measurement, PerfObject.IncludeTotal)
 					} else {
 						if PerfObject.FailOnMissing || PerfObject.WarnOnMissing {
-							err := m.InvalidObject(exists, query, PerfObject, instance, counter)
+							fmt.Printf("Invalid query: '%s'. Error: %s", query, err.Error())
+						}
+						if PerfObject.FailOnMissing {
 							return err
 						}
 					}
@@ -218,41 +173,11 @@ func (m *Win_PerfCounters) ParseConfig(metrics *itemList) error {
 	}
 }
 
-func (m *Win_PerfCounters) Cleanup(metrics *itemList) {
-	// Cleanup
-
-	for _, metric := range metrics.items {
-		ret := win.PdhCloseQuery(metric.handle)
-		_ = ret
-	}
-}
-
-func (m *Win_PerfCounters) CleanupTestMode() {
-	// Cleanup for the testmode.
-
-	for _, metric := range gItemList {
-		ret := win.PdhCloseQuery(metric.handle)
-		_ = ret
-	}
-}
-
 func (m *Win_PerfCounters) Gather(acc telegraf.Accumulator) error {
-	metrics := itemList{}
-
-	// Both values are empty in normal use.
-	if m.TestName != testObject {
-		// Cleanup any handles before emptying the global variable containing valid queries.
-		m.CleanupTestMode()
-		gItemList = make(map[int]*item)
-		testObject = m.TestName
-		testConfigParsed = true
-		configParsed = false
-	}
-
-	// We only need to parse the config during the init, it uses the global variable after.
-	if configParsed == false {
-
-		err := m.ParseConfig(&metrics)
+	// Parse the config once
+	if !m.configParsed {
+		err := m.ParseConfig()
+		m.configParsed = true
 		if err != nil {
 			return err
 		}
@@ -260,26 +185,26 @@ func (m *Win_PerfCounters) Gather(acc telegraf.Accumulator) error {
 
 	var bufSize uint32
 	var bufCount uint32
-	var size uint32 = uint32(unsafe.Sizeof(win.PDH_FMT_COUNTERVALUE_ITEM_DOUBLE{}))
-	var emptyBuf [1]win.PDH_FMT_COUNTERVALUE_ITEM_DOUBLE // need at least 1 addressable null ptr.
+	var size uint32 = uint32(unsafe.Sizeof(PDH_FMT_COUNTERVALUE_ITEM_DOUBLE{}))
+	var emptyBuf [1]PDH_FMT_COUNTERVALUE_ITEM_DOUBLE // need at least 1 addressable null ptr.
 
 	// For iterate over the known metrics and get the samples.
-	for _, metric := range gItemList {
+	for _, metric := range m.itemCache {
 		// collect
-		ret := win.PdhCollectQueryData(metric.handle)
-		if ret == win.ERROR_SUCCESS {
-			ret = win.PdhGetFormattedCounterArrayDouble(metric.counterHandle, &bufSize,
+		ret := PdhCollectQueryData(metric.handle)
+		if ret == ERROR_SUCCESS {
+			ret = PdhGetFormattedCounterArrayDouble(metric.counterHandle, &bufSize,
 				&bufCount, &emptyBuf[0]) // uses null ptr here according to MSDN.
-			if ret == win.PDH_MORE_DATA {
-				filledBuf := make([]win.PDH_FMT_COUNTERVALUE_ITEM_DOUBLE, bufCount*size)
+			if ret == PDH_MORE_DATA {
+				filledBuf := make([]PDH_FMT_COUNTERVALUE_ITEM_DOUBLE, bufCount*size)
 				if len(filledBuf) == 0 {
 					continue
 				}
-				ret = win.PdhGetFormattedCounterArrayDouble(metric.counterHandle,
+				ret = PdhGetFormattedCounterArrayDouble(metric.counterHandle,
 					&bufSize, &bufCount, &filledBuf[0])
 				for i := 0; i < int(bufCount); i++ {
 					c := filledBuf[i]
-					var s string = win.UTF16PtrToString(c.SzName)
+					var s string = UTF16PtrToString(c.SzName)
 
 					var add bool
 
@@ -292,6 +217,11 @@ func (m *Win_PerfCounters) Gather(acc telegraf.Accumulator) error {
 					} else if metric.instance == s {
 						// Catch if we set it to total or some form of it
 						add = true
+					} else if strings.Contains(metric.instance, "#") && strings.HasPrefix(metric.instance, s) {
+						// If you are using a multiple instance identifier such as "w3wp#1"
+						// phd.dll returns only the first 2 characters of the identifier.
+						add = true
+						s = metric.instance
 					} else if metric.instance == "------" {
 						add = true
 					}
@@ -320,7 +250,6 @@ func (m *Win_PerfCounters) Gather(acc telegraf.Accumulator) error {
 				bufCount = 0
 				bufSize = 0
 			}
-
 		}
 	}
 

@@ -22,10 +22,11 @@ func (g *CGroup) Gather(acc telegraf.Accumulator) error {
 
 	for dir := range list {
 		if dir.err != nil {
-			return dir.err
+			acc.AddError(dir.err)
+			continue
 		}
 		if err := g.gatherDir(dir.path, acc); err != nil {
-			return err
+			acc.AddError(err)
 		}
 	}
 
@@ -56,9 +57,10 @@ func (g *CGroup) gatherDir(dir string, acc telegraf.Accumulator) error {
 			return err
 		}
 	}
-	fields["path"] = dir
 
-	acc.AddFields(metricName, fields, nil)
+	tags := map[string]string{"path": dir}
+
+	acc.AddFields(metricName, fields, tags)
 
 	return nil
 }

@@ -9,8 +9,8 @@ API endpoint. In the following order the plugin will attempt to authenticate.
 1. Assumed credentials via STS if `role_arn` attribute is specified (source credentials are evaluated from subsequent rules)
 2. Explicit credentials from `access_key`, `secret_key`, and `token` attributes
 3. Shared profile from `profile` attribute
-4. [Environment Variables](https://github.com/aws/aws-sdk-go/wiki/configuring-sdk#environment-variables)
-5. [Shared Credentials](https://github.com/aws/aws-sdk-go/wiki/configuring-sdk#shared-credentials-file)
+4. [Environment Variables](https://docs.aws.amazon.com/sdk-for-go/v1/developer-guide/configuring-sdk.html#environment-variables)
+5. [Shared Credentials](https://docs.aws.amazon.com/sdk-for-go/v1/developer-guide/configuring-sdk.html#shared-credentials-file)
 6. [EC2 Instance Profile](http://docs.aws.amazon.com/AWSEC2/latest/UserGuide/iam-roles-for-amazon-ec2.html)
 
 ### Configuration:
@@ -18,41 +18,60 @@ API endpoint. In the following order the plugin will attempt to authenticate.
 ```toml
 [[inputs.cloudwatch]]
   ## Amazon Region (required)
-  region = 'us-east-1'
+  region = "us-east-1"
 
+  ## Amazon Credentials
+  ## Credentials are loaded in the following order
+  ## 1) Assumed credentials via STS if role_arn is specified
+  ## 2) explicit credentials from 'access_key' and 'secret_key'
+  ## 3) shared profile from 'profile'
+  ## 4) environment variables
+  ## 5) shared credentials file
+  ## 6) EC2 Instance Profile
+  #access_key = ""
+  #secret_key = ""
+  #token = ""
+  #role_arn = ""
+  #profile = ""
+  #shared_credential_file = ""
+
+  # The minimum period for Cloudwatch metrics is 1 minute (60s). However not all
+  # metrics are made available to the 1 minute period. Some are collected at
+  # 3 minute, 5 minute, or larger intervals. See https://aws.amazon.com/cloudwatch/faqs/#monitoring.
+  # Note that if a period is configured that is smaller than the minimum for a
+  # particular metric, that metric will not be returned by the Cloudwatch API
+  # and will not be collected by Telegraf.
+  #
   ## Requested CloudWatch aggregation Period (required - must be a multiple of 60s)
-  period = '1m'
+  period = "5m"
 
   ## Collection Delay (required - must account for metrics availability via CloudWatch API)
-  delay = '1m'
+  delay = "5m"
 
   ## Override global run interval (optional - defaults to global interval)
   ## Recomended: use metric 'interval' that is a multiple of 'period' to avoid
   ## gaps or overlap in pulled data
-  interval = '1m'
+  interval = "5m"
 
   ## Metric Statistic Namespace (required)
-  namespace = 'AWS/ELB'
+  namespace = "AWS/ELB"
 
   ## Maximum requests per second. Note that the global default AWS rate limit is
-  ## 10 reqs/sec, so if you define multiple namespaces, these should add up to a
-  ## maximum of 10. Optional - default value is 10.
-  ratelimit = 10
+  ## 400 reqs/sec, so if you define multiple namespaces, these should add up to a
+  ## maximum of 400. Optional - default value is 200.
+  ## See http://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/cloudwatch_limits.html
+  ratelimit = 200
 
   ## Metrics to Pull (optional)
   ## Defaults to all Metrics in Namespace if nothing is provided
   ## Refreshes Namespace available metrics every 1h
   [[inputs.cloudwatch.metrics]]
-    names = ['Latency', 'RequestCount']
+    names = ["Latency", "RequestCount"]
 
     ## Dimension filters for Metric (optional)
     [[inputs.cloudwatch.metrics.dimensions]]
-      name = 'LoadBalancerName'
-      value = 'p-example'
-
-    [[inputs.cloudwatch.metrics.dimensions]]
-      name = 'AvailabilityZone'
-      value = '*'
+      name = "LoadBalancerName"
+      value = "p-example"
 ```
 #### Requirements and Terminology
 
@@ -71,16 +90,16 @@ wildcard dimension is ignored.
 Example:
 ```
 [[inputs.cloudwatch.metrics]]
-  names = ['Latency']
+  names = ["Latency"]
 
   ## Dimension filters for Metric (optional)
   [[inputs.cloudwatch.metrics.dimensions]]
-    name = 'LoadBalancerName'
-    value = 'p-example'
+    name = "LoadBalancerName"
+    value = "p-example"
 
   [[inputs.cloudwatch.metrics.dimensions]]
-    name = 'AvailabilityZone'
-    value = '*'
+    name = "AvailabilityZone"
+    value = "*"
 ```
 
 If the following ELBs are available:
@@ -126,6 +145,6 @@ Tag Dimension names are represented in [snake case](https://en.wikipedia.org/wik
 ### Example Output:
 
 ```
-$ ./telegraf -config telegraf.conf -input-filter cloudwatch -test
+$ ./telegraf --config telegraf.conf --input-filter cloudwatch --test
 > cloudwatch_aws_elb,load_balancer_name=p-example,region=us-east-1,unit=seconds latency_average=0.004810798017284538,latency_maximum=0.1100282669067383,latency_minimum=0.0006084442138671875,latency_sample_count=4029,latency_sum=19.382705211639404 1459542420000000000
 ```

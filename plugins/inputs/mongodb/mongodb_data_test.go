@@ -42,7 +42,7 @@ func TestAddNonReplStats(t *testing.T) {
 	d.flush(&acc)
 
 	for key, _ := range DefaultStats {
-		assert.True(t, acc.HasIntField("mongodb", key))
+		assert.True(t, acc.HasInt64Field("mongodb", key))
 	}
 }
 
@@ -63,7 +63,7 @@ func TestAddReplStats(t *testing.T) {
 	d.flush(&acc)
 
 	for key, _ := range MmapStats {
-		assert.True(t, acc.HasIntField("mongodb", key))
+		assert.True(t, acc.HasInt64Field("mongodb", key))
 	}
 }
 
@@ -95,12 +95,12 @@ func TestStateTag(t *testing.T) {
 			Insert:        0,
 			Query:         0,
 			NodeType:      "PRI",
+			NodeState:     "PRIMARY",
 		},
 		tags,
 	)
 
 	stateTags := make(map[string]string)
-	stateTags["state"] = "PRI"
 
 	var acc testutil.Accumulator
 
@@ -115,6 +115,7 @@ func TestStateTag(t *testing.T) {
 		"getmores_per_sec":      int64(0),
 		"inserts_per_sec":       int64(0),
 		"member_status":         "PRI",
+		"state":                 "PRIMARY",
 		"net_in_bytes":          int64(0),
 		"net_out_bytes":         int64(0),
 		"open_connections":      int64(0),

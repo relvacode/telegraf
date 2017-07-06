@@ -44,6 +44,11 @@ type Kafka struct {
 	// Skip SSL verification
 	InsecureSkipVerify bool
 
+	// SASL Username
+	SASLUsername string `toml:"sasl_username"`
+	// SASL Password
+	SASLPassword string `toml:"sasl_password"`
+
 	tlsConfig tls.Config
 	producer  sarama.SyncProducer
 
@@ -56,7 +61,7 @@ var sampleConfig = `
   ## Kafka topic for producer messages
   topic = "telegraf"
   ## Telegraf tag to use as a routing key
-  ##  ie, if this tag exists, it's value will be used as the routing key
+  ##  ie, if this tag exists, its value will be used as the routing key
   routing_tag = "host"
 
   ## CompressionCodec represents the various compression codecs recognized by
@@ -92,8 +97,12 @@ var sampleConfig = `
   ## Use SSL but skip chain & host verification
   # insecure_skip_verify = false
 
+  ## Optional SASL Config
+  # sasl_username = "kafka"
+  # sasl_password = "secret"
+
   ## Data format to output.
-  ## Each data format has it's own unique set of configuration options, read
+  ## Each data format has its own unique set of configuration options, read
   ## more about them here:
   ## https://github.com/influxdata/telegraf/blob/master/docs/DATA_FORMATS_OUTPUT.md
   data_format = "influx"
@@ -109,6 +118,7 @@ func (k *Kafka) Connect() error {
 	config.Producer.RequiredAcks = sarama.RequiredAcks(k.RequiredAcks)
 	config.Producer.Compression = sarama.CompressionCodec(k.CompressionCodec)
 	config.Producer.Retry.Max = k.MaxRetry
+	config.Producer.Return.Successes = true
 
 	// Legacy support ssl config
 	if k.Certificate != "" {
@@ -126,6 +136,12 @@ func (k *Kafka) Connect() error {
 	if tlsConfig != nil {
 		config.Net.TLS.Config = tlsConfig
 		config.Net.TLS.Enable = true
+	}
+
+	if k.SASLUsername != "" && k.SASLPassword != "" {
+		config.Net.SASL.User = k.SASLUsername
+		config.Net.SASL.Password = k.SASLPassword
+		config.Net.SASL.Enable = true
 	}
 
 	producer, err := sarama.NewSyncProducer(k.Brokers, config)
@@ -154,26 +170,23 @@ func (k *Kafka) Write(metrics []telegraf.Metric) error {
 	}
 
 	for _, metric := range metrics {
-		values, err := k.serializer.Serialize(metric)
+		buf, err := k.serializer.Serialize(metric)
 		if err != nil {
 			return err
 		}
 
-		var pubErr error
-		for _, value := range values {
-			m := &sarama.ProducerMessage{
-				Topic: k.Topic,
-				Value: sarama.StringEncoder(value),
-			}
-			if h, ok := metric.Tags()[k.RoutingTag]; ok {
-				m.Key = sarama.StringEncoder(h)
-			}
-
-			_, _, pubErr = k.producer.SendMessage(m)
+		m := &sarama.ProducerMessage{
+			Topic: k.Topic,
+			Value: sarama.ByteEncoder(buf),
+		}
+		if h, ok := metric.Tags()[k.RoutingTag]; ok {
+			m.Key = sarama.StringEncoder(h)
 		}
 
-		if pubErr != nil {
-			return fmt.Errorf("FAILED to send kafka message: %s\n", pubErr)
+		_, _, err = k.producer.SendMessage(m)
+
+		if err != nil {
+			return fmt.Errorf("FAILED to send kafka message: %s\n", err)
 		}
 	}
 	return nil

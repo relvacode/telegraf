@@ -26,13 +26,14 @@ func TestPostgresqlGeneratesMetrics(t *testing.T) {
 		},
 	}
 	var acc testutil.Accumulator
-	err := p.Gather(&acc)
+	err := acc.GatherError(p.Gather)
 	require.NoError(t, err)
 
 	availableColumns := make(map[string]bool)
 	for _, col := range p.AllColumns {
 		availableColumns[col] = true
 	}
+
 	intMetrics := []string{
 		"xact_commit",
 		"xact_rollback",
@@ -47,6 +48,9 @@ func TestPostgresqlGeneratesMetrics(t *testing.T) {
 		"temp_files",
 		"temp_bytes",
 		"deadlocks",
+	}
+
+	int32Metrics := []string{
 		"numbackends",
 	}
 
@@ -55,12 +59,25 @@ func TestPostgresqlGeneratesMetrics(t *testing.T) {
 		"blk_write_time",
 	}
 
+	stringMetrics := []string{
+		"datname",
+		"datid",
+	}
+
 	metricsCounted := 0
 
 	for _, metric := range intMetrics {
 		_, ok := availableColumns[metric]
 		if ok {
-			assert.True(t, acc.HasIntField("postgresql", metric))
+			assert.True(t, acc.HasInt64Field("postgresql", metric))
+			metricsCounted++
+		}
+	}
+
+	for _, metric := range int32Metrics {
+		_, ok := availableColumns[metric]
+		if ok {
+			assert.True(t, acc.HasInt32Field("postgresql", metric))
 			metricsCounted++
 		}
 	}
@@ -69,6 +86,14 @@ func TestPostgresqlGeneratesMetrics(t *testing.T) {
 		_, ok := availableColumns[metric]
 		if ok {
 			assert.True(t, acc.HasFloatField("postgresql", metric))
+			metricsCounted++
+		}
+	}
+
+	for _, metric := range stringMetrics {
+		_, ok := availableColumns[metric]
+		if ok {
+			assert.True(t, acc.HasStringField("postgresql", metric))
 			metricsCounted++
 		}
 	}
@@ -89,7 +114,7 @@ func TestPostgresqlIgnoresUnwantedColumns(t *testing.T) {
 
 	var acc testutil.Accumulator
 
-	err := p.Gather(&acc)
+	err := acc.GatherError(p.Gather)
 	require.NoError(t, err)
 
 	for col := range p.IgnoredColumns() {

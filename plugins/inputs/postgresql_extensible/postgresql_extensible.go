@@ -8,10 +8,12 @@ import (
 	"regexp"
 	"strings"
 
+	// register in driver.
+	_ "github.com/jackc/pgx/stdlib"
+
 	"github.com/influxdata/telegraf"
 	"github.com/influxdata/telegraf/plugins/inputs"
-
-	"github.com/lib/pq"
+	"github.com/influxdata/telegraf/plugins/inputs/postgresql"
 )
 
 type Postgresql struct {
@@ -29,6 +31,7 @@ type Postgresql struct {
 		Tagvalue    string
 		Measurement string
 	}
+	Debug bool
 }
 
 type query []struct {
@@ -39,7 +42,7 @@ type query []struct {
 	Measurement string
 }
 
-var ignoredColumns = map[string]bool{"datid": true, "datname": true, "stats_reset": true}
+var ignoredColumns = map[string]bool{"stats_reset": true}
 
 var sampleConfig = `
   ## specify address via a url matching:
@@ -113,23 +116,24 @@ func (p *Postgresql) IgnoredColumns() map[string]bool {
 var localhost = "host=localhost sslmode=disable"
 
 func (p *Postgresql) Gather(acc telegraf.Accumulator) error {
-
-	var sql_query string
-	var query_addon string
-	var db_version int
-	var query string
-	var tag_value string
-	var meas_name string
+	var (
+		err         error
+		db          *sql.DB
+		sql_query   string
+		query_addon string
+		db_version  int
+		query       string
+		tag_value   string
+		meas_name   string
+	)
 
 	if p.Address == "" || p.Address == "localhost" {
 		p.Address = localhost
 	}
 
-	db, err := sql.Open("postgres", p.Address)
-	if err != nil {
+	if db, err = sql.Open("pgx", p.Address); err != nil {
 		return err
 	}
-
 	defer db.Close()
 
 	// Retreiving the database version
@@ -137,7 +141,7 @@ func (p *Postgresql) Gather(acc telegraf.Accumulator) error {
 	query = `select substring(setting from 1 for 3) as version from pg_settings where name='server_version_num'`
 	err = db.QueryRow(query).Scan(&db_version)
 	if err != nil {
-		return err
+		db_version = 0
 	}
 	// We loop in order to process each query
 	// Query is not run if Database version does not match the query version.
@@ -166,7 +170,8 @@ func (p *Postgresql) Gather(acc telegraf.Accumulator) error {
 		if p.Query[i].Version <= db_version {
 			rows, err := db.Query(sql_query)
 			if err != nil {
-				return err
+				acc.AddError(err)
+				continue
 			}
 
 			defer rows.Close()
@@ -174,7 +179,8 @@ func (p *Postgresql) Gather(acc telegraf.Accumulator) error {
 			// grab the column information from the result
 			p.OrderedColumns, err = rows.Columns()
 			if err != nil {
-				return err
+				acc.AddError(err)
+				continue
 			} else {
 				for _, v := range p.OrderedColumns {
 					p.AllColumns = append(p.AllColumns, v)
@@ -191,7 +197,8 @@ func (p *Postgresql) Gather(acc telegraf.Accumulator) error {
 			for rows.Next() {
 				err = p.accRow(meas_name, rows, acc)
 				if err != nil {
-					return err
+					acc.AddError(err)
+					break
 				}
 			}
 		}
@@ -211,7 +218,7 @@ func (p *Postgresql) SanitizedAddress() (_ string, err error) {
 	}
 	var canonicalizedAddress string
 	if strings.HasPrefix(p.Address, "postgres://") || strings.HasPrefix(p.Address, "postgresql://") {
-		canonicalizedAddress, err = pq.ParseURL(p.Address)
+		canonicalizedAddress, err = postgresql.ParseURL(p.Address)
 		if err != nil {
 			return p.sanitizedAddress, err
 		}
@@ -247,10 +254,7 @@ func (p *Postgresql) accRow(meas_name string, row scanner, acc telegraf.Accumula
 	}
 	if columnMap["datname"] != nil {
 		// extract the database name from the column map
-		dbnameChars := (*columnMap["datname"]).([]uint8)
-		for i := 0; i < len(dbnameChars); i++ {
-			dbname.WriteString(string(dbnameChars[i]))
-		}
+		dbname.WriteString((*columnMap["datname"]).(string))
 	} else {
 		dbname.WriteString("postgres")
 	}
@@ -274,19 +278,23 @@ COLUMN:
 		if ignore || *val == nil {
 			continue
 		}
+
 		for _, tag := range p.AdditionalTags {
 			if col != tag {
 				continue
 			}
 			switch v := (*val).(type) {
+			case string:
+				tags[col] = v
 			case []byte:
 				tags[col] = string(v)
-			case int64:
+			case int64, int32, int:
 				tags[col] = fmt.Sprintf("%d", v)
+			default:
+				log.Println("failed to add additional tag", col)
 			}
 			continue COLUMN
 		}
-
 		if v, ok := (*val).([]byte); ok {
 			fields[col] = string(v)
 		} else {
