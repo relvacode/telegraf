@@ -60,6 +60,7 @@ import (
 	_ "github.com/influxdata/telegraf/plugins/inputs/passenger"
 	_ "github.com/influxdata/telegraf/plugins/inputs/phpfpm"
 	_ "github.com/influxdata/telegraf/plugins/inputs/ping"
+	_ "github.com/influxdata/telegraf/plugins/inputs/plex"
 	_ "github.com/influxdata/telegraf/plugins/inputs/postgresql"
 	_ "github.com/influxdata/telegraf/plugins/inputs/postgresql_extensible"
 	_ "github.com/influxdata/telegraf/plugins/inputs/powerdns"
