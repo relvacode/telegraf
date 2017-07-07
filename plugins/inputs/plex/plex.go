@@ -65,7 +65,10 @@ func (pms *PlexMediaServer) Gather(acc telegraf.Accumulator) error {
 			"media_type":  stream.Type,
 			"resolution":  stream.Media.VideoResolution,
 		}
-		fields := map[string]interface{}{}
+		fields := map[string]interface{}{
+			"active": 1,
+		}
+
 		i, err := strconv.Atoi(stream.Session.Bandwidth)
 		if err == nil {
 			fields["bandwidth"] = i
@@ -79,10 +82,6 @@ func (pms *PlexMediaServer) Gather(acc telegraf.Accumulator) error {
 		}
 		acc.AddFields("plex", fields, tags)
 	}
-	acc.AddCounter("plex", map[string]interface{}{
-		"video_sessions": len(sessions.Video),
-		"track_sessions": len(sessions.Track),
-	}, nil)
 	return nil
 }
 

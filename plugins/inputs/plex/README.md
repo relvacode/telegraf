@@ -25,8 +25,7 @@ InecureSkipVerify is usually needed as Plex signs certificates valid for their o
 
 - bandwidth (from `Session.Bandwidth`)
 - transcode_speed (from `TranscodeSession.Speed`)
-- video_sessions (length of `Video` sessions)
-- track_sessions (length of `Track` sessions)
+- active (1 if session if active)
 
 ### Tags:
 
@@ -43,7 +42,6 @@ InecureSkipVerify is usually needed as Plex signs certificates valid for their o
 ```
 $ ./telegraf --config telegraf.conf --input-filter ping --test
 * Plugin: plex, Collection 1
-plex,device=Windows,user=User1,video_codec=h264,audio_codec=aac,media_type=episode,resolution=480p,host=hostname.local,platform=Chrome bandwidth=1981i,transcode_speed=0 1499447110000000000
-plex,media_type=episode,resolution=480p,host=hostname.local,platform=Chromecast,device=Chromecast,user=User2,video_codec=h264,audio_codec=aac bandwidth=1298i,transcode_speed=0 1499447110000000000
-plex,host=hostname.local video_sessions=2i,track_sessions=0i 1499447110000000000
+plex,device=Windows,user=User1,video_codec=h264,audio_codec=aac,media_type=episode,resolution=480p,host=hostname.local,platform=Chrome active=1i,bandwidth=1981i,transcode_speed=0 1499447110000000000
+plex,media_type=episode,resolution=480p,host=hostname.local,platform=Chromecast,device=Chromecast,user=User2,video_codec=h264,audio_codec=aac active=1i,bandwidth=1298i,transcode_speed=0 1499447110000000000
 ```
