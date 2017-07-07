@@ -2,10 +2,11 @@
 package deluge
 
 import (
+	"time"
+
 	"github.com/influxdata/telegraf"
 	"github.com/influxdata/telegraf/plugins/inputs"
 	"github.com/relvacode/go-libdeluge"
-	"time"
 )
 
 type RPCMethod func(*delugeclient.Client, telegraf.Accumulator) error
@@ -15,6 +16,9 @@ type Deluge struct {
 	Port     uint
 	Login    string
 	Password string
+
+	// methods are the list of used RPC methods to accumulate
+	methods []RPCMethod
 }
 
 func (Deluge) Description() string {
@@ -23,13 +27,14 @@ func (Deluge) Description() string {
 
 func (Deluge) SampleConfig() string {
 	return `
-  # Hostname is the IP or hostname of the deluge daemon
+  ## IP or hostname of the deluge daemon
   Hostname = "localhost"
-  # Port is the port number of the deluge daemon
+  
+  ## The port number of the deluge daemon
   Port = 58846
-  # Login and Password are optional but required for most deluge daemon configuration
-  # Authentication credentials can be found in $DELUGE_HOME/.config/deluge/auth
-  #
+
+  ## Login and Password are optional but required for most deluge daemon configuration
+  ## Authentication credentials can be found in $DELUGE_HOME/.config/deluge/auth
   # Login = "localclient"
   # Password = "password"
 	`
@@ -45,12 +50,6 @@ func (d *Deluge) Settings() delugeclient.Settings {
 	}
 }
 
-var methods = []RPCMethod{
-	GetSessionStatus(),
-	GetFreeSpace(),
-	GetTorrentsStatus(),
-}
-
 func (d *Deluge) Gather(acc telegraf.Accumulator) error {
 	c := delugeclient.New(d.Settings())
 	if err := c.Connect(); err != nil {
@@ -58,7 +57,7 @@ func (d *Deluge) Gather(acc telegraf.Accumulator) error {
 	}
 	defer c.Close()
 
-	for _, m := range methods {
+	for _, m := range d.methods {
 		if err := m(c, acc); err != nil {
 			return err
 		}
@@ -67,7 +66,7 @@ func (d *Deluge) Gather(acc telegraf.Accumulator) error {
 }
 
 func GetSessionStatus() RPCMethod {
-	values := []string{"upload_rate",
+	keys := []string{"upload_rate",
 		"download_rate",
 		"payload_upload_rate",
 		"payload_download_rate",
@@ -87,7 +86,7 @@ func GetSessionStatus() RPCMethod {
 	fields := map[string]interface{}{}
 	tags := map[string]string{}
 	return func(c *delugeclient.Client, acc telegraf.Accumulator) error {
-		s, err := c.SessionStatus(values)
+		s, err := c.SessionStatus(keys)
 		if err != nil {
 			return err
 		}
@@ -100,7 +99,6 @@ func GetSessionStatus() RPCMethod {
 }
 
 func GetFreeSpace() RPCMethod {
-	tags := map[string]string{}
 	fields := map[string]interface{}{}
 	return func(c *delugeclient.Client, acc telegraf.Accumulator) error {
 		free, err := c.FreeSpace()
@@ -108,21 +106,18 @@ func GetFreeSpace() RPCMethod {
 			return err
 		}
 		fields["free_space"] = free
-		acc.AddFields("deluge", fields, tags)
+		acc.AddFields("deluge", fields, nil)
 		return nil
-	}
-}
-
-func GetTorrentsStatus() RPCMethod {
-	keys := []string{}
-	return func(c *delugeclient.Client, acc telegraf.Accumulator) error {
-		err := c.TorrentsStatus(keys, nil)
-		return err
 	}
 }
 
 func init() {
 	inputs.Add("deluge", func() telegraf.Input {
-		return &Deluge{}
+		return &Deluge{
+			methods: []RPCMethod{
+				GetSessionStatus(),
+				GetFreeSpace(),
+			},
+		}
 	})
 }
