@@ -64,6 +64,7 @@ func (pms *PlexMediaServer) Gather(acc telegraf.Accumulator) error {
 			"audio_codec": stream.Media.AudioCodec,
 			"media_type":  stream.Type,
 			"resolution":  stream.Media.VideoResolution,
+			"stream_type": "direct_play",
 		}
 		fields := map[string]interface{}{
 			"active": 1,
@@ -74,6 +75,7 @@ func (pms *PlexMediaServer) Gather(acc telegraf.Accumulator) error {
 			fields["bandwidth"] = i
 		}
 		if stream.TranscodeSession.Key != "" {
+			tags["stream_type"] = "transcode"
 			f, err := strconv.ParseFloat(stream.TranscodeSession.Speed, 64)
 			if err != nil {
 				return err

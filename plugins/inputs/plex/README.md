@@ -36,6 +36,7 @@ InecureSkipVerify is usually needed as Plex signs certificates valid for their o
 - audio_codec (from `Media.AudioCodec`)
 - media_type (from `Type`)
 - resolution (from `Media.VideoResolution`)
+- stream_type (either direct_play or transcode)
 
 ### Example Output:
 
